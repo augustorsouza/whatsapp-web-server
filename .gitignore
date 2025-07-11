@@ -7,6 +7,7 @@ yarn.lock
 dist/
 build/
 coverage/
+.env
 .env.*
 .DS_Store
 *.log
@@ -24,3 +25,4 @@ temp/
 *.tgz
 .wwebjs_auth/
 .wwebjs_cache/
+qr-code.png
