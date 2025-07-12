@@ -17,7 +17,9 @@ let whatsappReady = false;
 let qrCodePath = null;
 
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new LocalAuth({
+        dataPath: './data'
+    }),
     puppeteer: {
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
         args: [
@@ -105,7 +107,54 @@ app.post('/send-group-message', async (req, res) => {
     }
 });
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
     console.log(`Server running on port ${port}`);
     console.log(`QR code will be available at: http://localhost:${port}/qr`);
+});
+
+// Graceful shutdown handler
+async function gracefulShutdown(signal) {
+    console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
+    
+    try {
+        // Stop accepting new connections
+        console.log('Closing HTTP server...');
+        server.close(() => {
+            console.log('HTTP server closed');
+        });
+        
+        // Clean up QR code file
+        if (qrCodePath && fs.existsSync(qrCodePath)) {
+            fs.unlinkSync(qrCodePath);
+            console.log('QR code file cleaned up');
+        }
+        
+        // Disconnect WhatsApp client
+        if (client) {
+            console.log('Disconnecting WhatsApp client...');
+            await client.destroy();
+            console.log('WhatsApp client disconnected');
+        }
+        
+        console.log('Graceful shutdown completed');
+        process.exit(0);
+    } catch (error) {
+        console.error('Error during graceful shutdown:', error);
+        process.exit(1);
+    }
+}
+
+// Handle termination signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught exceptions
+process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error);
+    gracefulShutdown('uncaughtException');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    gracefulShutdown('unhandledRejection');
 });

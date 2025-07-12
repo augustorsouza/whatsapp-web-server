@@ -24,10 +24,14 @@ RUN npm install
 
 COPY . .
 
+RUN rm -rf ./data
+RUN mkdir -p ./data
+
 # Set environment variables for Puppeteer
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 EXPOSE 3000
 
-CMD ["npm", "start"]
+# Run Node.js directly instead of through npm to handle signals properly
+CMD ["node", "index.js"]
