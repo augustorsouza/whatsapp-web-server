@@ -80,30 +80,71 @@ app.get('/status', (req, res) => {
 });
 
 app.post('/send-group-message', async (req, res) => {
+    const timestamp = new Date().toISOString();
+    const requestId = Math.random().toString(36).substring(2, 11);
+    
+    console.log(`[${timestamp}] [${requestId}] POST /send-group-message - Request received`);
+    
+    // Log request details (without sensitive data)
+    const { groupName, message } = req.body;
+    console.log(`[${timestamp}] [${requestId}] Request details: groupName="${groupName}", messageLength=${message?.length || 0}`);
+    
+    // Authorization check
     if (AUTH_TOKEN && req.headers['authorization'] !== `Bearer ${AUTH_TOKEN}`) {
+        console.log(`[${timestamp}] [${requestId}] Authorization failed - Invalid or missing token`);
         return res.status(403).json({ error: 'Unauthorized' });
     }
+    console.log(`[${timestamp}] [${requestId}] Authorization successful`);
 
-    const { groupName, message } = req.body;
+    // Request validation
     if (!groupName || !message) {
+        console.log(`[${timestamp}] [${requestId}] Validation failed - Missing required fields: groupName=${!!groupName}, message=${!!message}`);
         return res.status(400).json({ error: 'groupName and message required' });
     }
+    console.log(`[${timestamp}] [${requestId}] Request validation successful`);
 
+    // WhatsApp readiness check
     if (!whatsappReady) {
+        console.log(`[${timestamp}] [${requestId}] WhatsApp not ready - Client needs to scan QR code`);
         return res.status(503).json({ error: 'WhatsApp is not ready. Please scan the QR code first.' });
     }
+    console.log(`[${timestamp}] [${requestId}] WhatsApp client is ready`);
 
     try {
+        console.log(`[${timestamp}] [${requestId}] Fetching chats...`);
         const chats = await client.getChats();
+        console.log(`[${timestamp}] [${requestId}] Retrieved ${chats.length} chats`);
+        
+        console.log(`[${timestamp}] [${requestId}] Searching for group: "${groupName}"`);
         const group = chats.find(chat => chat.isGroup && chat.name === groupName);
+        
         if (!group) {
+            const availableGroups = chats.filter(chat => chat.isGroup).map(chat => chat.name);
+            console.log(`[${timestamp}] [${requestId}] Group not found: "${groupName}". Available groups: [${availableGroups.join(', ')}]`);
             return res.status(404).json({ error: 'Group not found' });
         }
+        
+        console.log(`[${timestamp}] [${requestId}] Group found: "${groupName}" (ID: ${group.id._serialized})`);
+        console.log(`[${timestamp}] [${requestId}] Sending message to group...`);
+        
         await client.sendMessage(group.id._serialized, message);
-        res.json({ success: true });
+        
+        console.log(`[${timestamp}] [${requestId}] Message sent successfully to group "${groupName}"`);
+        res.json({ success: true, requestId, timestamp });
+        
     } catch (err) {
-        console.error('Error sending message:', err);
-        res.status(500).json({ error: 'Failed to send message' });
+        console.error(`[${timestamp}] [${requestId}] Error sending message:`, {
+            error: err.message,
+            stack: err.stack,
+            groupName,
+            messageLength: message?.length || 0
+        });
+        res.status(500).json({ 
+            error: 'Failed to send message', 
+            requestId, 
+            timestamp,
+            details: process.env.NODE_ENV === 'development' ? err.message : undefined
+        });
     }
 });
 
