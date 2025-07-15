@@ -16,17 +16,105 @@ app.use(express.json());
 let whatsappReady = false;
 let qrCodePath = null;
 
+// Detect environment - simplified to just local vs docker
+const isDockerEnv = process.env.RAILWAY_ENVIRONMENT_ID || 
+                   process.env.RAILWAY_ENVIRONMENT || 
+                   process.env.DOCKER_ENV || 
+                   fs.existsSync('/.dockerenv');
+const isLocal = !isDockerEnv;
+
+// Get Chrome executable path based on environment
+function getChromeExecutablePath() {
+    if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+        return process.env.PUPPETEER_EXECUTABLE_PATH;
+    }
+    
+    if (isDockerEnv) {
+        return '/usr/bin/chromium';
+    }
+    
+    // Local development - let Puppeteer find Chrome
+    return undefined;
+}
+
+// Get Chrome args based on environment
+function getChromeArgs() {
+    const baseArgs = [
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--disable-gpu',
+        '--disable-background-timer-throttling',
+        '--disable-renderer-backgrounding',
+        '--disable-backgrounding-occluded-windows',
+    ];
+    
+    if (isDockerEnv) {
+        // Docker environment flags (Railway, Docker, etc.) - aggressive optimization
+        return [
+            ...baseArgs,
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--single-process',
+            '--no-zygote',
+            '--memory-pressure-off',
+            '--max_old_space_size=4096',
+            '--disable-ipc-flooding-protection',
+            '--disable-hang-monitor',
+            '--disable-web-security',
+            '--disable-features=VizDisplayCompositor',
+            '--user-data-dir=/tmp/chrome-user-data',
+            '--data-path=/tmp/chrome-data',
+            '--disk-cache-dir=/tmp/chrome-cache',
+            '--disable-extensions',
+            '--disable-plugins',
+            '--disable-sync',
+            '--aggressive-cache-discard',
+            '--disable-background-networking',
+            '--disable-prompt-on-repost',
+            '--disable-client-side-phishing-detection',
+            '--disable-component-update',
+            '--disable-domain-reliability',
+            '--disable-logging',
+            '--silent',
+            '--disable-breakpad',
+        ];
+    } else {
+        // Local development flags - minimal and safe
+        return [
+            ...baseArgs,
+            '--disable-extensions',
+            '--disable-default-apps',
+            '--disable-component-update',
+        ];
+    }
+}
+
+console.log(`Environment detected: ${isLocal ? 'Local' : 'Docker'}`);
+console.log(`Chrome executable: ${getChromeExecutablePath() || 'Auto-detected'}`);
+
 const client = new Client({
     authStrategy: new LocalAuth({
         dataPath: './data'
     }),
     puppeteer: {
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox'
-        ],
+        executablePath: getChromeExecutablePath(),
+        args: getChromeArgs(),
         headless: true,
+        ...(isDockerEnv ? {
+            // Docker environment settings
+            defaultViewport: null,
+            protocolTimeout: 240000,
+            timeout: 0,
+            handleSIGINT: false,
+            handleSIGTERM: false,
+            handleSIGHUP: false,
+        } : {
+            // Local development settings
+            defaultViewport: null,
+            protocolTimeout: 30000,
+            timeout: 30000,
+        })
     }
 });
 
