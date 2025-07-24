@@ -229,14 +229,54 @@ app.get('/status', (req, res) => {
     });
 });
 
-// Health check endpoint for Railway
+// Enhanced health check endpoint for Railway
 app.get('/health', (req, res) => {
-    res.json({
+    const healthData = {
         status: 'ok',
-        whatsappReady: whatsappReady,
-        uptime: process.uptime(),
-        timestamp: new Date().toISOString()
-    });
+        timestamp: new Date().toISOString(),
+        uptime: Math.floor(process.uptime()),
+        whatsapp: {
+            ready: whatsappReady,
+            isRestarting: isRestarting,
+            restartAttempts: restartAttempts,
+            maxRestartAttempts: MAX_RESTART_ATTEMPTS
+        },
+        memory: {
+            used: Math.round(process.memoryUsage().rss / 1024 / 1024),
+            heap: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+            external: Math.round(process.memoryUsage().external / 1024 / 1024)
+        },
+        environment: isDockerEnv ? 'docker' : 'local'
+    };
+
+    // Return 503 if WhatsApp is not ready and max restart attempts reached
+    if (!whatsappReady && restartAttempts >= MAX_RESTART_ATTEMPTS) {
+        return res.status(503).json({
+            ...healthData,
+            status: 'unhealthy',
+            reason: 'WhatsApp client failed to restart after maximum attempts'
+        });
+    }
+
+    // Return 200 for healthy status
+    res.status(200).json(healthData);
+});
+
+// Startup probe endpoint (for Railway to know when app is ready)
+app.get('/ready', (req, res) => {
+    if (whatsappReady) {
+        res.status(200).json({
+            ready: true,
+            timestamp: new Date().toISOString()
+        });
+    } else {
+        res.status(503).json({
+            ready: false,
+            isRestarting: isRestarting,
+            restartAttempts: restartAttempts,
+            timestamp: new Date().toISOString()
+        });
+    }
 });
 
 // IMPROVED send-group-message with better error handling
