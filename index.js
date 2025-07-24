@@ -15,6 +15,10 @@ app.use(express.json());
 // State management
 let whatsappReady = false;
 let qrCodePath = null;
+let client = null;
+let isRestarting = false;
+let restartAttempts = 0;
+const MAX_RESTART_ATTEMPTS = 3;
 
 // Detect environment - simplified to just local vs docker
 const isDockerEnv = process.env.RAILWAY_ENVIRONMENT_ID || 
@@ -37,7 +41,7 @@ function getChromeExecutablePath() {
     return undefined;
 }
 
-// Get Chrome args based on environment
+// Get Chrome args based on environment - IMPROVED for Railway stability
 function getChromeArgs() {
     const baseArgs = [
         '--disable-dev-shm-usage',
@@ -50,17 +54,14 @@ function getChromeArgs() {
     ];
     
     if (isDockerEnv) {
-        // Docker environment flags (Railway, Docker, etc.) - aggressive optimization
+        // Railway/Docker optimized flags - removed problematic --single-process
         return [
             ...baseArgs,
             '--no-sandbox',
             '--disable-setuid-sandbox',
-            '--single-process',
-            '--no-zygote',
             '--memory-pressure-off',
-            '--max_old_space_size=4096',
+            '--max_old_space_size=2048', // Reduced from 4096
             '--disable-ipc-flooding-protection',
-            '--disable-hang-monitor',
             '--disable-web-security',
             '--disable-features=VizDisplayCompositor',
             '--user-data-dir=/tmp/chrome-user-data',
@@ -69,15 +70,18 @@ function getChromeArgs() {
             '--disable-extensions',
             '--disable-plugins',
             '--disable-sync',
-            '--aggressive-cache-discard',
             '--disable-background-networking',
             '--disable-prompt-on-repost',
             '--disable-client-side-phishing-detection',
             '--disable-component-update',
             '--disable-domain-reliability',
             '--disable-logging',
-            '--silent',
             '--disable-breakpad',
+            // Additional stability flags
+            '--disable-dev-tools',
+            '--disable-crash-reporter',
+            '--no-crash-upload',
+            '--disable-gpu-crashpad',
         ];
     } else {
         // Local development flags - minimal and safe
@@ -90,62 +94,117 @@ function getChromeArgs() {
     }
 }
 
-console.log(`Environment detected: ${isLocal ? 'Local' : 'Docker'}`);
-console.log(`Chrome executable: ${getChromeExecutablePath() || 'Auto-detected'}`);
+// Create WhatsApp client with improved error handling
+function createWhatsAppClient() {
+    console.log(`Creating WhatsApp client... (Attempt ${restartAttempts + 1}/${MAX_RESTART_ATTEMPTS})`);
+    console.log(`Environment detected: ${isLocal ? 'Local' : 'Docker'}`);
+    console.log(`Chrome executable: ${getChromeExecutablePath() || 'Auto-detected'}`);
 
-const client = new Client({
-    authStrategy: new LocalAuth({
-        dataPath: './data'
-    }),
-    puppeteer: {
-        executablePath: getChromeExecutablePath(),
-        args: getChromeArgs(),
-        headless: true,
-        ...(isDockerEnv ? {
-            // Docker environment settings
-            defaultViewport: null,
-            protocolTimeout: 240000,
-            timeout: 0,
-            handleSIGINT: false,
-            handleSIGTERM: false,
-            handleSIGHUP: false,
-        } : {
-            // Local development settings
-            defaultViewport: null,
-            protocolTimeout: 30000,
-            timeout: 30000,
-        })
-    }
-});
+    const newClient = new Client({
+        authStrategy: new LocalAuth({
+            dataPath: './data'
+        }),
+        puppeteer: {
+            executablePath: getChromeExecutablePath(),
+            args: getChromeArgs(),
+            headless: true,
+            ...(isDockerEnv ? {
+                // Docker environment settings - improved timeouts
+                defaultViewport: null,
+                protocolTimeout: 180000, // Reduced from 240000
+                timeout: 60000, // Set reasonable timeout instead of 0
+                handleSIGINT: false,
+                handleSIGTERM: false,
+                handleSIGHUP: false,
+            } : {
+                // Local development settings
+                defaultViewport: null,
+                protocolTimeout: 30000,
+                timeout: 30000,
+            })
+        }
+    });
 
-client.on('qr', async (qr) => {
-    try {
-        // Generate QR code as PNG
-        qrCodePath = path.join(__dirname, 'qr-code.png');
-        await qrcode.toFile(qrCodePath, qr);
-        console.log('QR code generated. Access it at: /qr');
-    } catch (error) {
-        console.error('Error generating QR code:', error);
-    }
-});
+    // Event handlers
+    newClient.on('qr', async (qr) => {
+        try {
+            qrCodePath = path.join(__dirname, 'qr-code.png');
+            await qrcode.toFile(qrCodePath, qr);
+            console.log('QR code generated. Access it at: /qr');
+        } catch (error) {
+            console.error('Error generating QR code:', error);
+        }
+    });
 
-client.on('ready', () => {
-    console.log('WhatsApp is ready!');
-    whatsappReady = true;
-    
-    // Clean up QR code file
-    if (qrCodePath && fs.existsSync(qrCodePath)) {
-        fs.unlinkSync(qrCodePath);
+    newClient.on('ready', () => {
+        console.log('WhatsApp is ready!');
+        whatsappReady = true;
+        restartAttempts = 0; // Reset restart attempts on successful connection
+        
+        // Clean up QR code file
+        if (qrCodePath && fs.existsSync(qrCodePath)) {
+            fs.unlinkSync(qrCodePath);
+            qrCodePath = null;
+        }
+    });
+
+    newClient.on('disconnected', (reason) => {
+        console.log('Client was logged out:', reason);
+        whatsappReady = false;
         qrCodePath = null;
+        
+        // Auto-restart if not intentionally disconnected and within retry limits
+        if (!isRestarting && restartAttempts < MAX_RESTART_ATTEMPTS) {
+            console.log('Attempting to restart WhatsApp client...');
+            setTimeout(() => restartWhatsAppClient(), 5000); // Wait 5s before restart
+        }
+    });
+
+    // Handle authentication failure
+    newClient.on('auth_failure', (msg) => {
+        console.error('Authentication failure:', msg);
+        whatsappReady = false;
+    });
+
+    return newClient;
+}
+
+// Restart WhatsApp client function
+async function restartWhatsAppClient() {
+    if (isRestarting) {
+        console.log('Restart already in progress, skipping...');
+        return;
     }
-});
 
-client.on('disconnected', (reason) => {
-    console.log('Client was logged out:', reason);
-    whatsappReady = false;
-    qrCodePath = null;
-});
+    isRestarting = true;
+    restartAttempts++;
+    
+    console.log(`Restarting WhatsApp client (attempt ${restartAttempts}/${MAX_RESTART_ATTEMPTS})...`);
+    
+    try {
+        // Destroy old client
+        if (client) {
+            await client.destroy();
+        }
+        
+        // Create new client
+        client = createWhatsAppClient();
+        await client.initialize();
+        
+        console.log('WhatsApp client restart initiated');
+    } catch (error) {
+        console.error('Error restarting WhatsApp client:', error);
+        
+        if (restartAttempts >= MAX_RESTART_ATTEMPTS) {
+            console.error('Max restart attempts reached. Manual intervention required.');
+        }
+    } finally {
+        isRestarting = false;
+    }
+}
 
+// Initialize WhatsApp client
+client = createWhatsAppClient();
 client.initialize();
 
 // QR Code endpoint
@@ -159,14 +218,28 @@ app.get('/qr', (req, res) => {
     }
 });
 
-// Status endpoint
+// Status endpoint with more detailed info
 app.get('/status', (req, res) => {
     res.json({
         ready: whatsappReady,
-        qrAvailable: qrCodePath && fs.existsSync(qrCodePath)
+        qrAvailable: qrCodePath && fs.existsSync(qrCodePath),
+        isRestarting: isRestarting,
+        restartAttempts: restartAttempts,
+        maxRestartAttempts: MAX_RESTART_ATTEMPTS
     });
 });
 
+// Health check endpoint for Railway
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        whatsappReady: whatsappReady,
+        uptime: process.uptime(),
+        timestamp: new Date().toISOString()
+    });
+});
+
+// IMPROVED send-group-message with better error handling
 app.post('/send-group-message', async (req, res) => {
     const timestamp = new Date().toISOString();
     const requestId = Math.random().toString(36).substring(2, 11);
@@ -196,80 +269,156 @@ app.post('/send-group-message', async (req, res) => {
     
     console.log(`[${timestamp}] [${requestId}] Request validation successful`);
 
-    // WhatsApp readiness check
+    // WhatsApp readiness check with restart option
     if (!whatsappReady) {
-        console.log(`[${timestamp}] [${requestId}] WhatsApp not ready - Client needs to scan QR code`);
-        return res.status(503).json({ error: 'WhatsApp is not ready. Please scan the QR code first.' });
+        console.log(`[${timestamp}] [${requestId}] WhatsApp not ready - Current state: ready=${whatsappReady}, restarting=${isRestarting}`);
+        
+        // If not currently restarting and we haven't hit max attempts, try restart
+        if (!isRestarting && restartAttempts < MAX_RESTART_ATTEMPTS) {
+            console.log(`[${timestamp}] [${requestId}] Attempting to restart WhatsApp client...`);
+            restartWhatsAppClient(); // Don't await, let it run in background
+        }
+        
+        return res.status(503).json({ 
+            error: 'WhatsApp is not ready. Please scan the QR code or wait for automatic restart.',
+            isRestarting: isRestarting,
+            restartAttempts: restartAttempts
+        });
     }
     console.log(`[${timestamp}] [${requestId}] WhatsApp client is ready`);
 
-    try {
-        let targetGroupId;
-        let targetGroupName;
+    // Retry mechanism for the message sending
+    const MAX_SEND_RETRIES = 2;
+    let sendAttempts = 0;
+    
+    while (sendAttempts < MAX_SEND_RETRIES) {
+        sendAttempts++;
         
-        if (groupId) {
-            // Direct approach using groupId - much faster
-            console.log(`[${timestamp}] [${requestId}] Using direct groupId approach: "${groupId}"`);
-            targetGroupId = groupId;
-            targetGroupName = groupName || 'Unknown'; // Use provided name or fallback
+        try {
+            let targetGroupId;
+            let targetGroupName;
             
-            console.log(`[${timestamp}] [${requestId}] Sending message directly to group ID: ${targetGroupId}`);
-            
-        } else {
-            // Fallback approach using groupName - requires fetching chats
-            console.log(`[${timestamp}] [${requestId}] Using groupName approach, fetching chats...`);
-            const chats = await client.getChats();
-            console.log(`[${timestamp}] [${requestId}] Retrieved ${chats.length} chats`);
-            
-            console.log(`[${timestamp}] [${requestId}] Searching for group: "${groupName}"`);
-            const group = chats.find(chat => chat.isGroup && chat.name === groupName);
-            
-            if (!group) {
-                const availableGroups = chats.filter(chat => chat.isGroup).map(chat => chat.name);
-                console.log(`[${timestamp}] [${requestId}] Group not found: "${groupName}". Available groups: [${availableGroups.join(', ')}]`);
-                return res.status(404).json({ error: 'Group not found' });
+            if (groupId) {
+                // Direct approach using groupId - much faster
+                console.log(`[${timestamp}] [${requestId}] Using direct groupId approach: "${groupId}" (attempt ${sendAttempts})`);
+                targetGroupId = groupId;
+                targetGroupName = groupName || 'Unknown';
+                
+                console.log(`[${timestamp}] [${requestId}] Sending message directly to group ID: ${targetGroupId}`);
+                
+            } else {
+                // Fallback approach using groupName - requires fetching chats
+                console.log(`[${timestamp}] [${requestId}] Using groupName approach, fetching chats... (attempt ${sendAttempts})`);
+                const chats = await client.getChats();
+                console.log(`[${timestamp}] [${requestId}] Retrieved ${chats.length} chats`);
+                
+                console.log(`[${timestamp}] [${requestId}] Searching for group: "${groupName}"`);
+                const group = chats.find(chat => chat.isGroup && chat.name === groupName);
+                
+                if (!group) {
+                    const availableGroups = chats.filter(chat => chat.isGroup).map(chat => chat.name);
+                    console.log(`[${timestamp}] [${requestId}] Group not found: "${groupName}". Available groups: [${availableGroups.join(', ')}]`);
+                    return res.status(404).json({ error: 'Group not found' });
+                }
+                
+                targetGroupId = group.id._serialized;
+                targetGroupName = group.name;
+                console.log(`[${timestamp}] [${requestId}] Group found: "${targetGroupName}" (ID: ${targetGroupId})`);
             }
             
-            targetGroupId = group.id._serialized;
-            targetGroupName = group.name;
-            console.log(`[${timestamp}] [${requestId}] Group found: "${targetGroupName}" (ID: ${targetGroupId})`);
+            console.log(`[${timestamp}] [${requestId}] Sending message to group... (attempt ${sendAttempts})`);
+            await client.sendMessage(targetGroupId, message);
+            
+            console.log(`[${timestamp}] [${requestId}] Message sent successfully to group "${targetGroupName}" (ID: ${targetGroupId})`);
+            return res.json({ 
+                success: true, 
+                requestId, 
+                timestamp,
+                groupId: targetGroupId,
+                groupName: targetGroupName,
+                attempts: sendAttempts
+            });
+            
+        } catch (err) {
+            console.error(`[${timestamp}] [${requestId}] Error sending message (attempt ${sendAttempts}):`, {
+                error: err.message,
+                stack: err.stack,
+                groupName,
+                groupId,
+                messageLength: message?.length || 0
+            });
+            
+            // Check if it's a browser/session closed error
+            const isBrowserError = err.message.includes('Session closed') || 
+                                 err.message.includes('Protocol error') ||
+                                 err.message.includes('Target closed');
+            
+            if (isBrowserError) {
+                console.log(`[${timestamp}] [${requestId}] Browser session error detected. Marking client as not ready.`);
+                whatsappReady = false;
+                
+                // Trigger restart for next requests
+                if (!isRestarting && restartAttempts < MAX_RESTART_ATTEMPTS) {
+                    console.log(`[${timestamp}] [${requestId}] Triggering client restart due to browser error...`);
+                    setTimeout(() => restartWhatsAppClient(), 1000);
+                }
+                
+                // If this was our last attempt or first attempt with browser error, return error
+                if (sendAttempts >= MAX_SEND_RETRIES || sendAttempts === 1) {
+                    return res.status(503).json({ 
+                        error: 'Browser session was closed. WhatsApp client is restarting.', 
+                        requestId, 
+                        timestamp,
+                        details: process.env.NODE_ENV === 'development' ? err.message : undefined,
+                        willRetry: restartAttempts < MAX_RESTART_ATTEMPTS
+                    });
+                }
+                
+                // Break retry loop for browser errors - no point retrying immediately
+                break;
+            }
+            
+            // For non-browser errors, continue with retries
+            if (sendAttempts >= MAX_SEND_RETRIES) {
+                return res.status(500).json({ 
+                    error: 'Failed to send message after retries', 
+                    requestId, 
+                    timestamp,
+                    attempts: sendAttempts,
+                    details: process.env.NODE_ENV === 'development' ? err.message : undefined
+                });
+            }
+            
+            // Wait a bit before retry
+            await new Promise(resolve => setTimeout(resolve, 1000));
         }
-        
-        console.log(`[${timestamp}] [${requestId}] Sending message to group...`);
-        await client.sendMessage(targetGroupId, message);
-        
-        console.log(`[${timestamp}] [${requestId}] Message sent successfully to group "${targetGroupName}" (ID: ${targetGroupId})`);
-        res.json({ 
-            success: true, 
-            requestId, 
-            timestamp,
-            groupId: targetGroupId,
-            groupName: targetGroupName
-        });
-        
-    } catch (err) {
-        console.error(`[${timestamp}] [${requestId}] Error sending message:`, {
-            error: err.message,
-            stack: err.stack,
-            groupName,
-            groupId,
-            messageLength: message?.length || 0
-        });
-        res.status(500).json({ 
-            error: 'Failed to send message', 
-            requestId, 
-            timestamp,
-            details: process.env.NODE_ENV === 'development' ? err.message : undefined
-        });
     }
+});
+
+// Restart endpoint for manual recovery
+app.post('/restart', async (req, res) => {
+    if (AUTH_TOKEN && req.headers['authorization'] !== `Bearer ${AUTH_TOKEN}`) {
+        return res.status(403).json({ error: 'Unauthorized' });
+    }
+    
+    if (isRestarting) {
+        return res.json({ message: 'Restart already in progress' });
+    }
+    
+    console.log('Manual restart requested via API');
+    restartAttempts = 0; // Reset attempts for manual restart
+    restartWhatsAppClient();
+    
+    res.json({ message: 'WhatsApp client restart initiated' });
 });
 
 const server = app.listen(port, () => {
     console.log(`Server running on port ${port}`);
     console.log(`QR code will be available at: http://localhost:${port}/qr`);
+    console.log(`Health check available at: http://localhost:${port}/health`);
 });
 
-// Graceful shutdown handler
+// Graceful shutdown handler (unchanged)
 async function gracefulShutdown(signal) {
     console.log(`\nReceived ${signal}. Starting graceful shutdown...`);
     
