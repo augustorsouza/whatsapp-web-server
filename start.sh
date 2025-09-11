@@ -6,6 +6,13 @@ echo "Starting WhatsApp Web Server..."
 # Ensure data directory exists
 mkdir -p /app/data
 
+# Clean session if requested via environment variable
+if [ "$CLEAN_SESSION" = "true" ]; then
+    echo "Cleaning WhatsApp session data..."
+    rm -rf /app/data/session
+    echo "Session data cleaned"
+fi
+
 # Clean up Chrome lock files from previous runs
 echo "Cleaning up Chrome lock files..."
 find /app/data -name 'SingletonLock' -delete 2>/dev/null || true
